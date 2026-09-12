@@ -1,74 +1,97 @@
 # Codex advisor
 
-A Codex skill for one-shot, read-only consultations on difficult or stalled coding tasks.
+A Codex skill for one focused, read-only second opinion when coding work is
+stuck or uncertain.
 
-The helper sends a focused request to an ephemeral Codex process running against an explicit repository. It returns structured evidence, risks or alternatives, next steps, and uncertainty. It does not edit the repository or apply its own advice.
+The main session chooses when to ask. The advisor reads the active repository
+and returns evidence, risks or alternatives, next steps, and uncertainty. It
+does not edit files, commit changes, or apply its own advice.
 
 ## Install
 
-Copy this repository directory to `${CODEX_HOME:-$HOME/.codex}/skills/advisor`. The directory is installable because it contains the skill manifest in `SKILL.md` and the bundled `advisor.py` helper.
-
-Keep the helper beside `SKILL.md`, then invoke it by its installed path. The active repository is an explicit argument, so the command works from any caller directory:
+Copy this directory to:
 
 ```text
-python "${CODEX_HOME:-$HOME/.codex}/skills/advisor/advisor.py" --repo <active-repository> < request.json
+${CODEX_HOME:-$HOME/.codex}/skills/advisor
 ```
 
-On Windows PowerShell:
+Keep `SKILL.md` and `advisor.py` together. Codex discovers the skill from the
+front matter in `SKILL.md`.
 
-```powershell
-$skillDir = if ($env:CODEX_HOME) { Join-Path $env:CODEX_HOME "skills\advisor" } else { Join-Path $HOME ".codex\skills\advisor" }
-python (Join-Path $skillDir "advisor.py") --repo <active-repository> < request.json
-```
-
-## Run
-
-Create a JSON request with the goal, current hypothesis, attempted approaches, failures, constraints, and precise question:
-
-```json
-{
-  "goal": "Find the cause of the failing parser test.",
-  "current_hypothesis": "The parser accepts malformed input.",
-  "attempted_approaches": ["Changed the parser rule."],
-  "failures": ["The fixture still fails."],
-  "constraints": ["Keep the public API unchanged."],
-  "question": "Which layer should own the fix?"
-}
-```
-
-Send it on stdin. The active repository is an explicit argument, so the command works from any caller directory:
+Users normally interact with the skill through Codex:
 
 ```text
-python "${CODEX_HOME:-$HOME/.codex}/skills/advisor/advisor.py" --repo <active-repository> < request.json
+$advisor
+$advisor set astra low
 ```
 
-The request also accepts optional `parent_assumptions`, `task_context`, `model`, and `reasoning_effort` fields. The result is JSON. A successful result contains `advice.evidence`, `advice.risks_or_alternatives`, `advice.next_steps`, and `advice.uncertainty`.
+Codex runs the Python helper for you.
 
-## Native path and fallback
-
-Hosts that can provide a native child-agent consultation may pass a `NativeProvider` to `consult`. The helper selects it only when the provider is available, inherits the parent's task context, guarantees read-only behavior, and supports the selected model and reasoning effort. The native result uses the same advice contract.
-
-The command-line entry point cannot inject a native provider, so it uses the CLI fallback. The fallback invokes one ephemeral `codex exec` with `--sandbox read-only`, `--ask-for-approval never`, and the focused brief on stdin. If native requirements are missing, the helper uses that path. If a selected native provider fails while running, the helper returns a recoverable failure instead of silently consulting twice.
+The first command asks one question. The second saves the user-level model
+and effort preference without asking a question.
 
 ## Preferences
 
-Advisor defaults live only in `.codex/advisor.toml` under the repository passed to `--repo`:
+The default is `astra` at `low` effort. `astra` is the friendly name for the
+current Codex model `gpt-6-astra`.
 
-```toml
-model = "o3"
-reasoning_effort = "high"
-```
+The setting lives in `advisor.toml` beside the installed `advisor.py`. That
+file is shared across repositories for this skill. It is not
+`<active-repository>/.codex/advisor.toml`, and it does not change Codex's main
+`config.toml`.
 
-Advisor reads that file once when each consultation starts. It never writes the global Codex configuration. Change one default with the narrow natural-language command:
+The helper also accepts the exact setting command used by the skill:
 
 ```text
-python "${CODEX_HOME:-$HOME/.codex}/skills/advisor/advisor.py" --repo <active-repository> --set-preference "set model to o3"
-python "${CODEX_HOME:-$HOME/.codex}/skills/advisor/advisor.py" --repo <active-repository> --set-preference "set reasoning effort to high"
+python "<skill directory>/advisor.py" --set-preference "set astra low"
 ```
 
-The accepted form is `set`, `change`, or `update` followed by `model` or `reasoning effort`, `to`, and one value. A request may also include `model` and `reasoning_effort` fields for one-off overrides. Those values take precedence for that consultation and are not saved.
+A request can provide `model` and `reasoning_effort` for a one-off override.
+Those values take precedence for that consultation and are not saved.
 
-The supported models are `gpt-5`, `gpt-5-mini`, `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, `o1`, `o3`, and `o4-mini`. Unsupported models or incompatible reasoning efforts return a clear error before Codex starts. Consultation does not add cross-vendor adapters, automatic per-turn calls, global Codex configuration changes, persistent transcripts, or automatic application of advice.
+## Consultation paths
+
+When the host provides a native child advisor, use it only if it is available,
+read-only, inherits the task context, and supports the selected model and
+effort. Otherwise the helper runs one CLI fallback:
+
+```text
+python "<skill directory>/advisor.py" --repo <active-repository> < request.json
+```
+
+The fallback invokes one ephemeral `codex exec` with `--sandbox read-only` and
+`--ask-for-approval never`. It sends the focused request, including the
+current task context, on stdin. The active repository is its working
+directory.
+
+If a native child fails after selection, the helper returns a recoverable
+failure rather than silently starting a second consultation. The same rule
+applies to empty or invalid advice. The main session verifies advice before
+acting and summarizes the question, advice, decision, and uncertainty to the
+user.
+
+## Request and result
+
+The request must include a goal, current hypothesis, and precise question. It
+can also include attempted approaches, failures, constraints,
+`parent_assumptions`, `task_context`, `model`, and `reasoning_effort`.
+
+A successful result contains:
+
+```json
+{
+  "status": "ok",
+  "advice": {
+    "evidence": [],
+    "risks_or_alternatives": [],
+    "next_steps": [],
+    "uncertainty": ""
+  }
+}
+```
+
+The advisor reads only what it needs. It does not create a transcript,
+persistent report, or repository change.
 
 ## Check
 

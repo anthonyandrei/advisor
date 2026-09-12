@@ -33,8 +33,11 @@ class AdvisorPreferences:
     reasoning_effort: str | None = None
 
 
-PREFERENCES_PATH = Path(".codex") / "advisor.toml"
+PREFERENCES_PATH = Path(__file__).resolve().with_name("advisor.toml")
+DEFAULT_PREFERENCES = AdvisorPreferences("astra", "low")
+MODEL_ALIASES = {"astra": "gpt-6-astra"}
 MODEL_REASONING_EFFORTS = {
+    "gpt-6-astra": frozenset(("low", "medium", "high", "xhigh")),
     "gpt-5": frozenset(("minimal", "low", "medium", "high")),
     "gpt-5-mini": frozenset(("minimal", "low", "medium", "high")),
     "gpt-5-codex": frozenset(("low", "medium", "high", "xhigh")),
@@ -126,13 +129,14 @@ def _validate_settings(
     reasoning_effort: Any = None,
 ) -> AdvisorPreferences:
     selected_model = None if model is None else _required_text(model, "model")
+    canonical_model = MODEL_ALIASES.get(selected_model, selected_model)
     selected_effort = (
         None
         if reasoning_effort is None
         else _required_text(reasoning_effort, "reasoning_effort").lower()
     )
-    if selected_model is not None and selected_model not in MODEL_REASONING_EFFORTS:
-        supported = ", ".join(MODEL_REASONING_EFFORTS)
+    if canonical_model is not None and canonical_model not in MODEL_REASONING_EFFORTS:
+        supported = ", ".join((*MODEL_ALIASES, *MODEL_REASONING_EFFORTS))
         raise ValueError(f"unsupported model {selected_model!r}; choose one of: {supported}")
     if selected_effort is not None and selected_effort not in REASONING_EFFORTS:
         supported = ", ".join(sorted(REASONING_EFFORTS))
@@ -140,9 +144,9 @@ def _validate_settings(
             f"unsupported reasoning_effort {selected_effort!r}; choose one of: {supported}"
         )
     if (
-        selected_model is not None
+        canonical_model is not None
         and selected_effort is not None
-        and selected_effort not in MODEL_REASONING_EFFORTS[selected_model]
+        and selected_effort not in MODEL_REASONING_EFFORTS[canonical_model]
     ):
         raise ValueError(
             f"reasoning_effort {selected_effort!r} is not supported by model {selected_model!r}"
@@ -151,10 +155,10 @@ def _validate_settings(
 
 
 def load_preferences(repo: str | Path | None = None) -> AdvisorPreferences:
-    """Read advisor-only defaults from the active repository."""
-    path = _repository(repo) / PREFERENCES_PATH
+    """Read user-level advisor defaults beside the installed helper."""
+    path = PREFERENCES_PATH
     if not path.exists():
-        return AdvisorPreferences()
+        return DEFAULT_PREFERENCES
     if not path.is_file():
         raise ValueError(f"advisor preferences path is not a file: {path}")
     try:
@@ -169,7 +173,10 @@ def load_preferences(repo: str | Path | None = None) -> AdvisorPreferences:
     if unknown:
         raise ValueError(f"unsupported advisor preference key(s) in {path}: {', '.join(unknown)}")
     try:
-        return _validate_settings(payload.get("model"), payload.get("reasoning_effort"))
+        return _validate_settings(
+            payload.get("model", DEFAULT_PREFERENCES.model),
+            payload.get("reasoning_effort", DEFAULT_PREFERENCES.reasoning_effort),
+        )
     except ValueError as error:
         raise ValueError(f"invalid advisor preferences in {path}: {error}") from error
 
@@ -178,33 +185,41 @@ _PREFERENCE_CHANGE = re.compile(
     r"^\s*(?:set|change|update)\s+(model|reasoning\s+effort)\s+to\s+([A-Za-z0-9._-]+)\s*$",
     re.IGNORECASE,
 )
+_COMPACT_PREFERENCE_CHANGE = re.compile(
+    r"^\s*(?:set|change|update)\s+([A-Za-z0-9._-]+)\s+([A-Za-z0-9._-]+)\s*$",
+    re.IGNORECASE,
+)
 
 
 def update_preferences(
     change: str,
     repo: str | Path | None = None,
 ) -> AdvisorPreferences:
-    """Apply one exact natural-language change to advisor-only defaults."""
+    """Apply one exact change to user-level advisor defaults."""
     if not isinstance(change, str):
         raise ValueError("preference change must be a string")
     match = _PREFERENCE_CHANGE.fullmatch(change)
-    if match is None:
+    compact_match = _COMPACT_PREFERENCE_CHANGE.fullmatch(change)
+    if match is None and compact_match is None:
         raise ValueError(
-            "preference change must look like 'set model to o3' or "
-            "'set reasoning effort to high'"
+            "preference change must look like 'set astra low', 'set model to o3', "
+            "or 'set reasoning effort to high'"
         )
 
-    repository = _repository(repo)
-    current = load_preferences(repository)
-    field = "reasoning_effort" if "effort" in match.group(1) else "model"
+    current = load_preferences(repo)
     values = {
         "model": current.model,
         "reasoning_effort": current.reasoning_effort,
     }
-    values[field] = match.group(2)
+    if compact_match is not None:
+        values["model"] = compact_match.group(1)
+        values["reasoning_effort"] = compact_match.group(2)
+    else:
+        field = "reasoning_effort" if "effort" in match.group(1) else "model"
+        values[field] = match.group(2)
     updated = _validate_settings(values["model"], values["reasoning_effort"])
 
-    path = repository / PREFERENCES_PATH
+    path = PREFERENCES_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     if updated.model is not None:
@@ -264,6 +279,7 @@ def build_brief(request: ConsultationRequest) -> str:
     failures = _items(request.failures, "failures")
     constraints = _items(request.constraints, "constraints")
     assumptions = _items(request.parent_assumptions, "parent_assumptions")
+    task_context = _context_text(request.task_context)
 
     lines = [
         "Act as a read-only advisor for the active repository.",
@@ -300,6 +316,8 @@ def build_brief(request: ConsultationRequest) -> str:
         "## Precise question",
         question,
     ]
+    if task_context:
+        lines.extend(("", "## Current task context", task_context))
     return "\n".join(lines)
 
 
@@ -322,7 +340,7 @@ def build_codex_argv(
         "never",
     ]
     if settings.model is not None:
-        argv.extend(("--model", settings.model))
+        argv.extend(("--model", MODEL_ALIASES.get(settings.model, settings.model)))
     if settings.reasoning_effort is not None:
         argv.extend(
             ("--config", f"model_reasoning_effort={json.dumps(settings.reasoning_effort)}")
@@ -387,6 +405,8 @@ def _native_supported(
         return False
     if not isinstance(capabilities, NativeCapabilities):
         return False
+    requested_model = MODEL_ALIASES.get(request.model, request.model)
+    capability_model = MODEL_ALIASES.get(capabilities.model, capabilities.model)
     return (
         capabilities.available is True
         and callable(invoke)
@@ -406,7 +426,7 @@ def _native_supported(
                 and bool(capabilities.reasoning_effort.strip())
             )
         )
-        and (request.model is None or capabilities.model == request.model)
+        and (requested_model is None or capability_model == requested_model)
         and (
             request.reasoning_effort is None
             or capabilities.reasoning_effort == request.reasoning_effort
@@ -424,7 +444,7 @@ def _consult_native(
         repository=repository,
         task_context=request.task_context,
         brief=brief,
-        model=request.model,
+        model=MODEL_ALIASES.get(request.model, request.model),
         reasoning_effort=request.reasoning_effort,
         read_only=True,
     )
@@ -472,7 +492,6 @@ def consult(
 ) -> ConsultationResult:
     """Consult a safe native provider or the fixed read-only Codex fallback."""
     try:
-        brief = build_brief(request)
         request = replace(
             request,
             model=_optional_text(request.model, "model"),
@@ -481,6 +500,7 @@ def consult(
             ),
             task_context=_context_text(request.task_context),
         )
+        brief = build_brief(request)
     except (TypeError, ValueError) as error:
         return _failure("invalid_request", "", str(error))
 
@@ -593,7 +613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--set-preference",
         metavar="CHANGE",
-        help="update one advisor default, for example: 'set model to o3'",
+        help="update user-level advisor defaults, for example: 'set astra low'",
     )
     args = parser.parse_args(argv)
 

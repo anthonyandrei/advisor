@@ -85,6 +85,10 @@ class AdvisorTests(unittest.TestCase):
                     "read-only",
                     "--ask-for-approval",
                     "never",
+                    "--model",
+                    "gpt-6-astra",
+                    "--config",
+                    'model_reasoning_effort="low"',
                     "exec",
                     "--ephemeral",
                     "-",
@@ -98,11 +102,32 @@ class AdvisorTests(unittest.TestCase):
             self.assertFalse(calls[0][1]["shell"])
             self.assertEqual(fixture.read_text(encoding="utf-8"), "unchanged\n")
 
-    def test_consult_snapshots_project_preferences_before_starting_codex(self):
+    def test_cli_brief_includes_task_context(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            preferences = repo / ".codex" / "advisor.toml"
-            preferences.parent.mkdir()
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append((argv, kwargs))
+                return subprocess.CompletedProcess(argv, 0, self.advice_output(), "")
+
+            result = consult(
+                replace(self.request(), task_context="The parent is debugging the parser integration."),
+                repo=repo,
+                codex_executable="codex-test",
+                runner=runner,
+            )
+
+            self.assertEqual(result.status, "ok")
+            self.assertIn(
+                "## Current task context\nThe parent is debugging the parser integration.",
+                calls[0][1]["input"],
+            )
+
+    def test_consult_snapshots_global_preferences_before_starting_codex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            preferences = Path(directory) / "advisor.toml"
             preferences.write_text(
                 'model = "o3"\nreasoning_effort = "high"\n',
                 encoding="utf-8",
@@ -117,12 +142,13 @@ class AdvisorTests(unittest.TestCase):
                 )
                 return subprocess.CompletedProcess(argv, 0, self.advice_output(), "")
 
-            result = consult(
-                self.request(),
-                repo=repo,
-                codex_executable="codex-test",
-                runner=runner,
-            )
+            with patch("advisor.PREFERENCES_PATH", preferences):
+                result = consult(
+                    self.request(),
+                    repo=repo,
+                    codex_executable="codex-test",
+                    runner=runner,
+                )
 
             self.assertEqual(result.status, "ok")
             self.assertEqual(
@@ -146,8 +172,7 @@ class AdvisorTests(unittest.TestCase):
     def test_one_off_settings_override_defaults_without_persisting(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            preferences = repo / ".codex" / "advisor.toml"
-            preferences.parent.mkdir()
+            preferences = Path(directory) / "advisor.toml"
             original = 'model = "o3"\nreasoning_effort = "high"\n'
             preferences.write_text(original, encoding="utf-8")
             calls = []
@@ -156,12 +181,13 @@ class AdvisorTests(unittest.TestCase):
                 calls.append(argv)
                 return subprocess.CompletedProcess(argv, 0, self.advice_output(), "")
 
-            result = consult(
-                replace(self.request(), model="gpt-5", reasoning_effort="low"),
-                repo=repo,
-                codex_executable="codex-test",
-                runner=runner,
-            )
+            with patch("advisor.PREFERENCES_PATH", preferences):
+                result = consult(
+                    replace(self.request(), model="gpt-5", reasoning_effort="low"),
+                    repo=repo,
+                    codex_executable="codex-test",
+                    runner=runner,
+                )
 
             self.assertEqual(result.status, "ok")
             self.assertIn("--model", calls[0])
@@ -174,8 +200,9 @@ class AdvisorTests(unittest.TestCase):
             root = Path(directory)
             repo = root / "project"
             repo.mkdir()
-            preferences = repo / ".codex" / "advisor.toml"
-            preferences.parent.mkdir()
+            other_repo = root / "other-project"
+            other_repo.mkdir()
+            preferences = root / "advisor.toml"
             preferences.write_text(
                 'model = "o3"\nreasoning_effort = "high"\n',
                 encoding="utf-8",
@@ -186,10 +213,12 @@ class AdvisorTests(unittest.TestCase):
             global_config.write_text('model = "global-default"\n', encoding="utf-8")
 
             with patch("pathlib.Path.home", return_value=home):
-                updated = update_preferences("set model to gpt-5", repo=repo)
+                with patch("advisor.PREFERENCES_PATH", preferences):
+                    updated = update_preferences("set model to gpt-5", repo=repo)
+                    self.assertEqual(load_preferences(repo), updated)
+                    self.assertEqual(load_preferences(other_repo), updated)
 
             self.assertEqual(updated, AdvisorPreferences("gpt-5", "high"))
-            self.assertEqual(load_preferences(repo), updated)
             self.assertEqual(global_config.read_text(encoding="utf-8"), 'model = "global-default"\n')
 
     def test_incompatible_settings_fail_before_codex_without_fallback(self):
@@ -215,31 +244,37 @@ class AdvisorTests(unittest.TestCase):
     def test_invalid_preference_change_does_not_rewrite_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            preferences = repo / ".codex" / "advisor.toml"
-            preferences.parent.mkdir()
+            preferences = Path(directory) / "advisor.toml"
             original = 'model = "o3"\nreasoning_effort = "high"\n'
             preferences.write_text(original, encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "unsupported model"):
-                update_preferences("set model to unsupported-model", repo=repo)
+            with patch("advisor.PREFERENCES_PATH", preferences):
+                with self.assertRaisesRegex(ValueError, "unsupported model"):
+                    update_preferences("set model to unsupported-model", repo=repo)
 
             self.assertEqual(preferences.read_text(encoding="utf-8"), original)
 
     def test_main_exposes_the_narrow_preference_update_entry_point(self):
         with tempfile.TemporaryDirectory() as directory:
             output = StringIO()
-            with redirect_stdout(output):
-                exit_code = main(
-                    ["--repo", directory, "--set-preference", "set model to o3"]
-                )
+            preferences = Path(directory) / "advisor.toml"
+            with patch("advisor.PREFERENCES_PATH", preferences):
+                with redirect_stdout(output):
+                    exit_code = main(
+                        ["--repo", directory, "--set-preference", "set astra low"]
+                    )
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(
                 json.loads(output.getvalue()),
                 {
                     "status": "ok",
-                    "preferences": {"model": "o3", "reasoning_effort": None},
+                    "preferences": {"model": "astra", "reasoning_effort": "low"},
                 },
+            )
+            self.assertEqual(
+                preferences.read_text(encoding="utf-8"),
+                'model = "astra"\nreasoning_effort = "low"\n',
             )
     def test_consult_selects_capable_native_and_passes_context(self):
         with tempfile.TemporaryDirectory() as directory:
