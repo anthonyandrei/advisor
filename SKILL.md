@@ -1,6 +1,8 @@
 ---
 name: advisor
 description: Use proactively when coding work is stuck or uncertain and a focused, read-only second opinion could unblock it. Trigger on unclear failures, repeated unsuccessful fixes, unfamiliar code paths, competing implementation choices, or risky changes.
+metadata:
+  targets: [codex]
 ---
 
 # Advisor
