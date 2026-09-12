@@ -1,6 +1,8 @@
 # Codex advisor
 
-A passive Codex skill for one-shot, read-only consultations during difficult coding tasks.
+A passive Codex skill for one-shot, read-only consultations on difficult coding tasks.
+
+The helper sends a focused request to an ephemeral Codex process running against an explicit repository. It returns structured evidence, risks or alternatives, next steps, and uncertainty. It does not edit the repository or apply its own advice.
 
 ## Install
 
@@ -21,21 +23,32 @@ python (Join-Path $skillDir "advisor.py") --repo <active-repository> < request.j
 
 ## Run
 
-Send a JSON request on stdin. From an installed skill, use the helper path shown above:
+Create a JSON request with the goal, current hypothesis, attempted approaches, failures, constraints, and precise question:
+
+```json
+{
+  "goal": "Find the cause of the failing parser test.",
+  "current_hypothesis": "The parser accepts malformed input.",
+  "attempted_approaches": ["Changed the parser rule."],
+  "failures": ["The fixture still fails."],
+  "constraints": ["Keep the public API unchanged."],
+  "question": "Which layer should own the fix?"
+}
+```
+
+Send it on stdin. The active repository is an explicit argument, so the command works from any caller directory:
 
 ```text
 python "${CODEX_HOME:-$HOME/.codex}/skills/advisor/advisor.py" --repo <active-repository> < request.json
 ```
 
-The request uses `goal`, `current_hypothesis`, `attempted_approaches`, `failures`, `constraints`, `question`, and optional `parent_assumptions`, `task_context`, `model`, and `reasoning_effort`. The result is JSON. A successful result contains `advice.evidence`, `advice.risks_or_alternatives`, `advice.next_steps`, and `advice.uncertainty`.
-
-The consultation is ephemeral and explicitly read-only. Command failures are returned as recoverable result statuses. The parent agent checks the returned evidence, risks, next steps, and uncertainty before making any change.
+The request also accepts optional `parent_assumptions`, `task_context`, `model`, and `reasoning_effort` fields. The result is JSON. A successful result contains `advice.evidence`, `advice.risks_or_alternatives`, `advice.next_steps`, and `advice.uncertainty`.
 
 ## Native path and fallback
 
 Hosts that can provide a native child-agent consultation may pass a `NativeProvider` to `consult`. The helper selects it only when the provider is available, inherits the parent's task context, guarantees read-only behavior, and supports the selected model and reasoning effort. The native result uses the same advice contract.
 
-The command-line entry point cannot inject a native provider, so it uses the safe CLI fallback. The fallback invokes one ephemeral `codex exec` with `--sandbox read-only`, `--ask-for-approval never`, and the focused brief on stdin. If native requirements are missing, the helper falls back to that CLI path. If a selected native provider fails while running, the helper returns a recoverable failure rather than silently consulting twice.
+The command-line entry point cannot inject a native provider, so it uses the CLI fallback. The fallback invokes one ephemeral `codex exec` with `--sandbox read-only`, `--ask-for-approval never`, and the focused brief on stdin. If native requirements are missing, the helper uses that path. If a selected native provider fails while running, the helper returns a recoverable failure instead of silently consulting twice.
 
 ## Preferences
 
