@@ -1,6 +1,6 @@
 # Codex advisor
 
-A passive Codex skill for one-shot, read-only consultations on difficult coding tasks.
+A Codex skill for one-shot, read-only consultations on difficult or stalled coding tasks.
 
 The helper sends a focused request to an ephemeral Codex process running against an explicit repository. It returns structured evidence, risks or alternatives, next steps, and uncertainty. It does not edit the repository or apply its own advice.
 

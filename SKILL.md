@@ -1,12 +1,11 @@
 ---
 name: advisor
-description: Get a one-shot, read-only Codex consultation for a difficult coding question.
-disable-model-invocation: true
+description: Use proactively when coding work is stuck or uncertain and a focused, read-only second opinion could unblock it. Trigger on unclear failures, repeated unsuccessful fixes, unfamiliar code paths, competing implementation choices, or risky changes.
 ---
 
 # Advisor
 
-Use this skill only when the user explicitly asks for an advisor consultation. It is passive and does not run automatically on each turn.
+Use this skill when coding work is stuck or uncertain and a focused, read-only second opinion could unblock it. It starts one consultation and returns advice. The parent verifies that advice before acting.
 
 ## Install and run
 
