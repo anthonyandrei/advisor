@@ -91,6 +91,7 @@ class AdvisorTests(unittest.TestCase):
                     'model_reasoning_effort="low"',
                     "exec",
                     "--ephemeral",
+                    "--skip-git-repo-check",
                     "-",
                 ],
             )
@@ -101,6 +102,24 @@ class AdvisorTests(unittest.TestCase):
             self.assertFalse(calls[0][1]["check"])
             self.assertFalse(calls[0][1]["shell"])
             self.assertEqual(fixture.read_text(encoding="utf-8"), "unchanged\n")
+
+    def test_consult_allows_non_git_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, self.advice_output(), "")
+
+            result = consult(
+                self.request(),
+                repo=Path(directory),
+                codex_executable="codex-test",
+                runner=runner,
+            )
+
+            self.assertEqual(result.status, "ok")
+            self.assertIn("--skip-git-repo-check", calls[0])
 
     def test_cli_brief_includes_task_context(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -165,6 +184,7 @@ class AdvisorTests(unittest.TestCase):
                     'model_reasoning_effort="high"',
                     "exec",
                     "--ephemeral",
+                    "--skip-git-repo-check",
                     "-",
                 ],
             )
@@ -403,6 +423,7 @@ class AdvisorTests(unittest.TestCase):
                         'model_reasoning_effort="high"',
                         "exec",
                         "--ephemeral",
+                        "--skip-git-repo-check",
                         "-",
                     ],
                 )

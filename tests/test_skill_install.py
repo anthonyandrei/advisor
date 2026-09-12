@@ -93,6 +93,7 @@ class InstalledSkillSmokeTests(unittest.TestCase):
                     'model_reasoning_effort="low"',
                     "exec",
                     "--ephemeral",
+                    "--skip-git-repo-check",
                     "-",
                 ],
             )

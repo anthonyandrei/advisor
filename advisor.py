@@ -345,7 +345,7 @@ def build_codex_argv(
         argv.extend(
             ("--config", f"model_reasoning_effort={json.dumps(settings.reasoning_effort)}")
         )
-    argv.extend(("exec", "--ephemeral", "-"))
+    argv.extend(("exec", "--ephemeral", "--skip-git-repo-check", "-"))
     return argv
 
 
