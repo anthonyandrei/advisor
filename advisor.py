@@ -465,7 +465,7 @@ def consult(
     repo: str | Path | None = None,
     *,
     codex_executable: str | Path = "codex",
-    runner: Runner = subprocess.run,
+    runner: Runner | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     native_provider: NativeProvider | None = None,
@@ -523,6 +523,8 @@ def consult(
     except (TypeError, ValueError) as error:
         return _failure("invalid_command", brief, str(error))
 
+    if runner is None:
+        runner = subprocess.run
     try:
         completed = runner(
             argv,
