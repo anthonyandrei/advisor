@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
+import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -20,6 +22,30 @@ class ConsultationRequest:
     constraints: Sequence[str] = ()
     question: str = ""
     parent_assumptions: Sequence[str] = ()
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True)
+class AdvisorPreferences:
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
+PREFERENCES_PATH = Path(".codex") / "advisor.toml"
+MODEL_REASONING_EFFORTS = {
+    "gpt-5": frozenset(("minimal", "low", "medium", "high")),
+    "gpt-5-mini": frozenset(("minimal", "low", "medium", "high")),
+    "gpt-5-codex": frozenset(("low", "medium", "high", "xhigh")),
+    "gpt-5.1-codex": frozenset(("low", "medium", "high", "xhigh")),
+    "gpt-5.1-codex-max": frozenset(("low", "medium", "high", "xhigh")),
+    "o1": frozenset(("low", "medium", "high")),
+    "o3": frozenset(("low", "medium", "high")),
+    "o4-mini": frozenset(("low", "medium", "high")),
+}
+REASONING_EFFORTS = frozenset(
+    effort for efforts in MODEL_REASONING_EFFORTS.values() for effort in efforts
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +82,111 @@ def _required_text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _repository(repo: str | Path | None) -> Path:
+    repository = Path.cwd() if repo is None else Path(repo)
+    repository = repository.expanduser().resolve()
+    if not repository.is_dir():
+        raise ValueError(f"repository does not exist: {repository}")
+    return repository
+
+
+def _validate_settings(
+    model: Any = None,
+    reasoning_effort: Any = None,
+) -> AdvisorPreferences:
+    selected_model = None if model is None else _required_text(model, "model")
+    selected_effort = (
+        None
+        if reasoning_effort is None
+        else _required_text(reasoning_effort, "reasoning_effort").lower()
+    )
+    if selected_model is not None and selected_model not in MODEL_REASONING_EFFORTS:
+        supported = ", ".join(MODEL_REASONING_EFFORTS)
+        raise ValueError(f"unsupported model {selected_model!r}; choose one of: {supported}")
+    if selected_effort is not None and selected_effort not in REASONING_EFFORTS:
+        supported = ", ".join(sorted(REASONING_EFFORTS))
+        raise ValueError(
+            f"unsupported reasoning_effort {selected_effort!r}; choose one of: {supported}"
+        )
+    if (
+        selected_model is not None
+        and selected_effort is not None
+        and selected_effort not in MODEL_REASONING_EFFORTS[selected_model]
+    ):
+        raise ValueError(
+            f"reasoning_effort {selected_effort!r} is not supported by model {selected_model!r}"
+        )
+    return AdvisorPreferences(selected_model, selected_effort)
+
+
+def load_preferences(repo: str | Path | None = None) -> AdvisorPreferences:
+    """Read advisor-only defaults from the active repository."""
+    path = _repository(repo) / PREFERENCES_PATH
+    if not path.exists():
+        return AdvisorPreferences()
+    if not path.is_file():
+        raise ValueError(f"advisor preferences path is not a file: {path}")
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as error:
+        raise ValueError(f"invalid advisor preferences in {path}: {error}") from error
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"could not read advisor preferences {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(f"advisor preferences must be a TOML table: {path}")
+    unknown = sorted(set(payload) - {"model", "reasoning_effort"})
+    if unknown:
+        raise ValueError(f"unsupported advisor preference key(s) in {path}: {', '.join(unknown)}")
+    try:
+        return _validate_settings(payload.get("model"), payload.get("reasoning_effort"))
+    except ValueError as error:
+        raise ValueError(f"invalid advisor preferences in {path}: {error}") from error
+
+
+_PREFERENCE_CHANGE = re.compile(
+    r"^\s*(?:set|change|update)\s+(model|reasoning\s+effort)\s+to\s+([A-Za-z0-9._-]+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def update_preferences(
+    change: str,
+    repo: str | Path | None = None,
+) -> AdvisorPreferences:
+    """Apply one exact natural-language change to advisor-only defaults."""
+    if not isinstance(change, str):
+        raise ValueError("preference change must be a string")
+    match = _PREFERENCE_CHANGE.fullmatch(change)
+    if match is None:
+        raise ValueError(
+            "preference change must look like 'set model to o3' or "
+            "'set reasoning effort to high'"
+        )
+
+    repository = _repository(repo)
+    current = load_preferences(repository)
+    field = "reasoning_effort" if "effort" in match.group(1) else "model"
+    values = {
+        "model": current.model,
+        "reasoning_effort": current.reasoning_effort,
+    }
+    values[field] = match.group(2)
+    updated = _validate_settings(values["model"], values["reasoning_effort"])
+
+    path = repository / PREFERENCES_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = []
+    if updated.model is not None:
+        lines.append(f"model = {json.dumps(updated.model)}")
+    if updated.reasoning_effort is not None:
+        lines.append(f"reasoning_effort = {json.dumps(updated.reasoning_effort)}")
+    try:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError as error:
+        raise ValueError(f"could not write advisor preferences {path}: {error}") from error
+    return updated
 
 
 def _items(value: Any, field: str) -> tuple[str, ...]:
@@ -129,22 +260,32 @@ def build_brief(request: ConsultationRequest) -> str:
     return "\n".join(lines)
 
 
-def build_codex_argv(codex_executable: str | Path = "codex") -> list[str]:
+def build_codex_argv(
+    codex_executable: str | Path = "codex",
+    *,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> list[str]:
     """Build the fixed safety boundary for one consultation."""
     executable = str(codex_executable)
     if not executable:
         raise ValueError("codex_executable must not be empty")
-    # Keep all CLI extension points in this boundary for later model or effort flags.
-    return [
+    settings = _validate_settings(model, reasoning_effort)
+    argv = [
         executable,
         "--sandbox",
         "read-only",
         "--ask-for-approval",
         "never",
-        "exec",
-        "--ephemeral",
-        "-",
     ]
+    if settings.model is not None:
+        argv.extend(("--model", settings.model))
+    if settings.reasoning_effort is not None:
+        argv.extend(
+            ("--config", f"model_reasoning_effort={json.dumps(settings.reasoning_effort)}")
+        )
+    argv.extend(("exec", "--ephemeral", "-"))
+    return argv
 
 
 def _failure(
@@ -196,6 +337,8 @@ def consult(
     *,
     codex_executable: str | Path = "codex",
     runner: Runner = subprocess.run,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> ConsultationResult:
     """Consult Codex once and return a structured result without changing the repo."""
     try:
@@ -204,15 +347,33 @@ def consult(
         return _failure("invalid_request", "", str(error))
 
     try:
-        repository = Path.cwd() if repo is None else Path(repo)
-        repository = repository.expanduser().resolve()
+        repository = _repository(repo)
     except (TypeError, ValueError, OSError) as error:
         return _failure("invalid_repository", brief, str(error))
-    if not repository.is_dir():
-        return _failure("invalid_repository", brief, f"repository does not exist: {repository}")
 
     try:
-        argv = build_codex_argv(codex_executable)
+        settings = load_preferences(repository)
+    except (TypeError, ValueError, OSError) as error:
+        return _failure("invalid_preferences", brief, str(error))
+
+    requested_model = model if model is not None else request.model
+    requested_effort = (
+        reasoning_effort if reasoning_effort is not None else request.reasoning_effort
+    )
+    try:
+        settings = _validate_settings(
+            settings.model if requested_model is None else requested_model,
+            settings.reasoning_effort if requested_effort is None else requested_effort,
+        )
+    except (TypeError, ValueError) as error:
+        return _failure("invalid_preferences", brief, str(error))
+
+    try:
+        argv = build_codex_argv(
+            codex_executable,
+            model=settings.model,
+            reasoning_effort=settings.reasoning_effort,
+        )
     except (TypeError, ValueError) as error:
         return _failure("invalid_command", brief, str(error))
 
@@ -272,22 +433,37 @@ def _request_from_payload(payload: Any) -> ConsultationRequest:
         constraints=payload.get("constraints", ()),
         question=payload.get("question"),
         parent_assumptions=payload.get("parent_assumptions", ()),
+        model=payload.get("model"),
+        reasoning_effort=payload.get("reasoning_effort"),
     )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=".", help="active repository to consult")
+    parser.add_argument(
+        "--set-preference",
+        metavar="CHANGE",
+        help="update one advisor default, for example: 'set model to o3'",
+    )
     args = parser.parse_args(argv)
 
-    try:
-        request = _request_from_payload(json.load(sys.stdin))
-    except (json.JSONDecodeError, TypeError, ValueError) as error:
-        result = _failure("invalid_request", "", str(error))
+    if args.set_preference is not None:
+        try:
+            preferences = update_preferences(args.set_preference, repo=args.repo)
+        except (TypeError, ValueError, OSError) as error:
+            result = {"status": "invalid_preferences", "error": str(error)}
+        else:
+            result = {"status": "ok", "preferences": asdict(preferences)}
     else:
-        result = consult(request, repo=args.repo)
+        try:
+            request = _request_from_payload(json.load(sys.stdin))
+        except (json.JSONDecodeError, TypeError, ValueError) as error:
+            result = _failure("invalid_request", "", str(error))
+        else:
+            result = consult(request, repo=args.repo)
 
-    json.dump(result.to_dict(), sys.stdout)
+    json.dump(result.to_dict() if isinstance(result, ConsultationResult) else result, sys.stdout)
     sys.stdout.write("\n")
     return 0
 

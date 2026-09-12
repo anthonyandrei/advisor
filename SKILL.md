@@ -16,6 +16,17 @@ Pass that request as JSON on stdin to `advisor.py` from the active repository:
 python advisor.py --repo <active-repository> < request.json
 ```
 
+Advisor defaults are project-local in `<active-repository>/.codex/advisor.toml`:
+
+```toml
+model = "o3"
+reasoning_effort = "high"
+```
+
+Update one default with an exact, narrow command such as `python advisor.py --repo <active-repository> --set-preference "set model to o3"` or `"set reasoning effort to high"`. The command writes only that advisor file. It does not write the global Codex configuration.
+
+For a single consultation, add `model` and/or `reasoning_effort` to the JSON request. They override the saved defaults for that call and are never persisted. The helper validates the model and its supported reasoning efforts before invoking Codex.
+
 The helper runs one `codex exec --ephemeral` process with `--sandbox read-only` and `--ask-for-approval never`. It passes the focused brief on stdin, uses the active repository as `cwd`, and stores no transcript or patch.
 
 Read the JSON result. On `status: "ok"`, use only its `advice` object:
