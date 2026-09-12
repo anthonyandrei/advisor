@@ -6,7 +6,7 @@ import argparse
 import json
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -20,6 +20,37 @@ class ConsultationRequest:
     constraints: Sequence[str] = ()
     question: str = ""
     parent_assumptions: Sequence[str] = ()
+    model: str | None = None
+    reasoning_effort: str | None = None
+    task_context: str = ""
+
+
+@dataclass(frozen=True)
+class NativeCapabilities:
+    model: str | None = None
+    reasoning_effort: str | None = None
+    inherits_task_context: bool = False
+    read_only: bool = False
+    available: bool = True
+
+
+@dataclass(frozen=True)
+class NativeInvocation:
+    repository: Path
+    task_context: str
+    brief: str
+    model: str | None
+    reasoning_effort: str | None
+    read_only: bool = True
+
+
+NativeInvoker = Callable[[NativeInvocation], Any]
+
+
+@dataclass(frozen=True)
+class NativeProvider:
+    capabilities: NativeCapabilities
+    invoke: NativeInvoker
 
 
 @dataclass(frozen=True)
@@ -55,6 +86,20 @@ class ConsultationResult:
 def _required_text(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty string when provided")
+    return value.strip()
+
+
+def _context_text(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("task_context must be a string")
     return value.strip()
 
 
@@ -190,16 +235,111 @@ def _advice(payload: Any) -> AdviceContract:
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def _native_supported(
+    provider: NativeProvider | None,
+    request: ConsultationRequest,
+) -> bool:
+    if provider is None:
+        return False
+    try:
+        capabilities = provider.capabilities
+        invoke = provider.invoke
+    except Exception:
+        return False
+    if not isinstance(capabilities, NativeCapabilities):
+        return False
+    return (
+        capabilities.available is True
+        and callable(invoke)
+        and capabilities.inherits_task_context is True
+        and capabilities.read_only is True
+        and (
+            capabilities.model is None
+            or (
+                isinstance(capabilities.model, str)
+                and bool(capabilities.model.strip())
+            )
+        )
+        and (
+            capabilities.reasoning_effort is None
+            or (
+                isinstance(capabilities.reasoning_effort, str)
+                and bool(capabilities.reasoning_effort.strip())
+            )
+        )
+        and (request.model is None or capabilities.model == request.model)
+        and (
+            request.reasoning_effort is None
+            or capabilities.reasoning_effort == request.reasoning_effort
+        )
+    )
+
+
+def _consult_native(
+    provider: NativeProvider,
+    request: ConsultationRequest,
+    repository: Path,
+    brief: str,
+) -> ConsultationResult:
+    invocation = NativeInvocation(
+        repository=repository,
+        task_context=request.task_context,
+        brief=brief,
+        model=request.model,
+        reasoning_effort=request.reasoning_effort,
+        read_only=True,
+    )
+    try:
+        payload = provider.invoke(invocation)
+    except Exception as error:
+        message = str(error) or error.__class__.__name__
+        return _failure("failed", brief, f"native advisor failed: {message}")
+
+    raw_output = payload if isinstance(payload, str) else ""
+    if isinstance(payload, str):
+        if not payload.strip():
+            return _failure("empty", brief, "native advisor returned no advice")
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return _failure(
+                "invalid_advice",
+                brief,
+                "native advisor advice was not valid JSON",
+                raw_output=raw_output,
+            )
+    try:
+        advice = payload if isinstance(payload, AdviceContract) else _advice(payload)
+    except ValueError as error:
+        return _failure("invalid_advice", brief, str(error), raw_output=raw_output)
+    return ConsultationResult(
+        status="ok",
+        recoverable=True,
+        advice=advice,
+        brief=brief,
+        raw_output=raw_output,
+    )
+
+
 def consult(
     request: ConsultationRequest,
     repo: str | Path | None = None,
     *,
     codex_executable: str | Path = "codex",
     runner: Runner = subprocess.run,
+    native_provider: NativeProvider | None = None,
 ) -> ConsultationResult:
-    """Consult Codex once and return a structured result without changing the repo."""
+    """Consult a safe native provider or the fixed read-only Codex fallback."""
     try:
         brief = build_brief(request)
+        request = replace(
+            request,
+            model=_optional_text(request.model, "model"),
+            reasoning_effort=_optional_text(
+                request.reasoning_effort, "reasoning_effort"
+            ),
+            task_context=_context_text(request.task_context),
+        )
     except (TypeError, ValueError) as error:
         return _failure("invalid_request", "", str(error))
 
@@ -210,6 +350,9 @@ def consult(
         return _failure("invalid_repository", brief, str(error))
     if not repository.is_dir():
         return _failure("invalid_repository", brief, f"repository does not exist: {repository}")
+
+    if _native_supported(native_provider, request):
+        return _consult_native(native_provider, request, repository, brief)
 
     try:
         argv = build_codex_argv(codex_executable)
@@ -272,6 +415,9 @@ def _request_from_payload(payload: Any) -> ConsultationRequest:
         constraints=payload.get("constraints", ()),
         question=payload.get("question"),
         parent_assumptions=payload.get("parent_assumptions", ()),
+        model=payload.get("model"),
+        reasoning_effort=payload.get("reasoning_effort"),
+        task_context=payload.get("task_context", ""),
     )
 
 
