@@ -1,6 +1,6 @@
 ---
 name: advisor
-description: Use proactively when coding work is stuck or uncertain and a focused, read-only second opinion could help. Trigger on unclear failures, repeated failed fixes, unfamiliar code, competing designs, risky changes, final checks, or a direct user request.
+description: Invoke for one read-only second opinion on coding work when a specific uncertainty remains: an unclear failure, repeated failed fixes, an unfamiliar code path, competing designs, a risky change, or a high-risk final check. Also invoke when the user asks for `$advisor`.
 metadata:
   targets: [codex]
 ---
